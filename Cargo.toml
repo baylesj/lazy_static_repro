@@ -1,0 +1,16 @@
+[workspace]
+members = [
+    "static_embedded",
+    "lazy_computed",
+    "runtime_computed",
+]
+resolver = "2"
+
+# Release profile at workspace level — applies to all members.
+# Default settings: no LTO, no strip, no size optimization.
+# This is the "naive" release build.
+[profile.release]
+opt-level = 3
+debug = false
+lto = false
+codegen-units = 16
