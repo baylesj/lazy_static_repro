@@ -3,11 +3,13 @@
 # Run from the workspace root: bash measure.sh
 #
 # Crates (columns):
-#   static_embedded  — include_bytes! embeds .bin files into .rodata
-#   static_literal   — f64 literals in generated .rs source (Symphonia pattern)
-#   lazy_computed    — lazy_static Box<[f64]>, values computed at runtime
-#   lazy_array       — lazy_static [f64; N], values computed at runtime
-#   runtime_computed — plain runtime Vec, shared helper (smallest binary)
+#   static_embedded    — include_bytes! embeds .bin files into .rodata
+#   static_literal     — f64 literals in generated .rs source (Symphonia pattern)
+#   lazy_lock_literal  — same as static_literal but with std::sync::LazyLock
+#   lazy_computed      — lazy_static Box<[f64]>, values computed at runtime
+#   lazy_array         — lazy_static [f64; N], values computed at runtime
+#   lazy_lock_array    — LazyLock [f64; N], values computed at runtime
+#   runtime_computed   — plain runtime Vec, shared helper (smallest binary)
 #
 # Profiles (rows):
 #   release          — opt=3, no LTO, 16 CGU  (naive baseline)
@@ -19,7 +21,7 @@ set -euo pipefail
 WORKSPACE="$(cd "$(dirname "$0")" && pwd)"
 cd "$WORKSPACE"
 
-CRATES=(static_embedded static_literal lazy_computed lazy_array runtime_computed)
+CRATES=(static_embedded static_literal lazy_lock_literal lazy_computed lazy_array lazy_lock_array runtime_computed)
 PROFILES=(release release-lto release-size release-min)
 
 sep()    { printf '\n%s\n' "────────────────────────────────────────────────────────────────────────────────"; }
@@ -122,8 +124,10 @@ done
 
 sep
 printf "  KEY INSIGHT\n"
-printf "  Across all profiles, static_embedded and static_literal remain ~32 MB\n"
-printf "  larger than the runtime variants. LTO and opt=z shrink the CODE section\n"
-printf "  by a few hundred KB at most — they cannot remove data that is actively\n"
-printf "  referenced. The only fix is to not embed the data at compile time.\n"
+printf "  Across all profiles, static_embedded, static_literal, and lazy_lock_literal\n"
+printf "  remain ~32 MB larger than the runtime variants. Switching from lazy_static\n"
+printf "  to LazyLock makes no difference — the bloat comes from literal values in\n"
+printf "  source, not from the choice of lazy primitive. LTO and opt=z shrink the\n"
+printf "  CODE section by a few hundred KB at most; they cannot remove data that is\n"
+printf "  actively referenced. The only fix is to not embed the data at compile time.\n"
 sep

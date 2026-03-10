@@ -2,8 +2,10 @@
 members = [
     "static_embedded",
     "static_literal",
+    "lazy_lock_literal",
     "lazy_computed",
     "lazy_array",
+    "lazy_lock_array",
     "runtime_computed",
 ]
 resolver = "2"
