@@ -8,11 +8,36 @@ members = [
 ]
 resolver = "2"
 
-# Release profile at workspace level — applies to all members.
-# Default settings: no LTO, no strip, no size optimization.
-# This is the "naive" release build.
+# ── Profiles ──────────────────────────────────────────────────────────────────
+# All named profiles below inherit from release and override specific knobs.
+# This lets measure.sh sweep every crate × every profile for a comparison grid.
+
+# Baseline: no LTO, no strip, 16 codegen units — the "naive" release build.
 [profile.release]
 opt-level = 3
 debug = false
 lto = false
 codegen-units = 16
+
+# Full fat LTO + single codegen unit — maximum inlining and deduplication.
+# Best case for code size; does NOT remove embedded .rodata data.
+[profile.release-lto]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+
+# Optimize for size (prefer smaller code over speed).
+# Strips symbols to cut debug/symbol table overhead.
+[profile.release-size]
+inherits = "release"
+opt-level = "s"
+strip = "symbols"
+
+# Aggressive minimum size: opt=z + fat LTO + single CGU + strip.
+# As small as rustc can make a binary without PGO or manual assembly.
+[profile.release-min]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+strip = "symbols"

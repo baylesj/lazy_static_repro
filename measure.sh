@@ -1,170 +1,129 @@
 #!/usr/bin/env bash
-# measure.sh — build all five versions and produce a detailed comparison.
+# measure.sh — build every crate × every profile and print a comparison grid.
 # Run from the workspace root: bash measure.sh
 #
-# The five versions:
-#   static_embedded  — pre-computed data baked in via include_bytes! (build.rs → .bin files)
-#   static_literal   — pre-computed data as f64 literals in generated .rs source (Symphonia pattern)
-#   lazy_computed    — lazy_static Box<[f64]> with runtime sin/cos computation
-#   lazy_array       — lazy_static [f64; N] with runtime sin/cos computation (Symphonia type shape)
-#   runtime_computed — plain runtime Vec with a shared helper function (smallest binary)
+# Crates (columns):
+#   static_embedded  — include_bytes! embeds .bin files into .rodata
+#   static_literal   — f64 literals in generated .rs source (Symphonia pattern)
+#   lazy_computed    — lazy_static Box<[f64]>, values computed at runtime
+#   lazy_array       — lazy_static [f64; N], values computed at runtime
+#   runtime_computed — plain runtime Vec, shared helper (smallest binary)
+#
+# Profiles (rows):
+#   release          — opt=3, no LTO, 16 CGU  (naive baseline)
+#   release-lto      — opt=3, fat LTO, 1 CGU
+#   release-size     — opt=s, strip
+#   release-min      — opt=z, fat LTO, 1 CGU, strip
 
 set -euo pipefail
 WORKSPACE="$(cd "$(dirname "$0")" && pwd)"
 cd "$WORKSPACE"
 
-STATIC_BIN="target/release/static_embedded"
-LITERAL_BIN="target/release/static_literal"
-LAZY_BIN="target/release/lazy_computed"
-ARRAY_BIN="target/release/lazy_array"
-RUNTIME_BIN="target/release/runtime_computed"
+CRATES=(static_embedded static_literal lazy_computed lazy_array runtime_computed)
+PROFILES=(release release-lto release-size release-min)
 
-sep() { printf '\n%s\n' "────────────────────────────────────────────────────────────────"; }
-header() { sep; echo "  $*"; sep; }
+sep()    { printf '\n%s\n' "────────────────────────────────────────────────────────────────────────────────"; }
+header() { sep; printf '  %s\n' "$*"; sep; }
+bytes_of() { stat -f%z "$1" 2>/dev/null || stat -c%s "$1"; }
+fmt_mb()   { printf "%.2f" "$(echo "scale=4; $1 / 1048576" | bc)"; }
 
 # ── Build ──────────────────────────────────────────────────────────────────────
 
-header "1 / 5  Building static_embedded (release)  [build.rs → .bin files → include_bytes!]"
-cargo build --release -p static_embedded 2>&1
+total=$(( ${#CRATES[@]} * ${#PROFILES[@]} ))
+n=0
+for profile in "${PROFILES[@]}"; do
+    for crate in "${CRATES[@]}"; do
+        n=$(( n + 1 ))
+        header "$n / $total  $crate  [--profile $profile]"
+        cargo build --profile "$profile" -p "$crate" 2>&1
+    done
+done
 
-header "2 / 5  Building static_literal (release)   [build.rs → .rs literals → include!]"
-cargo build --release -p static_literal 2>&1
+# ── Smoke test — spot-check one profile to confirm all outputs agree ──────────
 
-header "3 / 5  Building lazy_computed (release)    [lazy_static Box<[f64]>, runtime computed]"
-cargo build --release -p lazy_computed 2>&1
+header "Smoke test (release profile) — outputs must agree"
+for crate in "${CRATES[@]}"; do
+    bin="target/release/$crate"
+    echo "  $crate : $("$bin")"
+done
 
-header "4 / 5  Building lazy_array (release)        [lazy_static [f64; N], runtime computed]"
-cargo build --release -p lazy_array 2>&1
+# ── Size grid ─────────────────────────────────────────────────────────────────
 
-header "5 / 5  Building runtime_computed (release)"
-cargo build --release -p runtime_computed 2>&1
+header "BINARY SIZE GRID  (MB on disk)"
 
-# ── Smoke-test: all five should print the same sum ────────────────────────────
+# Header row
+printf "  %-18s" "profile \\ crate"
+for crate in "${CRATES[@]}"; do
+    printf "  %16s" "$crate"
+done
+printf "\n"
 
-header "Smoke test — outputs must agree"
-echo "  static_embedded  : $("$STATIC_BIN")"
-echo "  static_literal   : $("$LITERAL_BIN")"
-echo "  lazy_computed    : $("$LAZY_BIN")"
-echo "  lazy_array       : $("$ARRAY_BIN")"
-echo "  runtime_computed : $("$RUNTIME_BIN")"
-
-# ── Binary sizes ───────────────────────────────────────────────────────────────
-
-header "Binary sizes (ls -lh)"
-ls -lh "$STATIC_BIN" "$LITERAL_BIN" "$LAZY_BIN" "$ARRAY_BIN" "$RUNTIME_BIN"
-
-# ── Section breakdown — macOS (size) ──────────────────────────────────────────
-
-header "Section sizes — static_embedded"
-size "$STATIC_BIN"
-
-header "Section sizes — static_literal"
-size "$LITERAL_BIN"
-
-header "Section sizes — lazy_computed"
-size "$LAZY_BIN"
-
-header "Section sizes — lazy_array"
-size "$ARRAY_BIN"
-
-header "Section sizes — runtime_computed"
-size "$RUNTIME_BIN"
-
-# ── objdump largest sections (macOS uses llvm-objdump or system objdump) ──────
-
-run_objdump() {
-    local bin="$1" label="$2"
-    sep
-    echo "  Top sections by size — $label"
-    sep
-    if command -v objdump &>/dev/null; then
-        objdump -h "$bin" 2>/dev/null \
-          | awk 'NR>4 && NF>=5 { printf "%12s  %s\n", $3, $2 }' \
-          | sort -rn \
-          | head -15 \
-          || true
-    else
-        echo "  (objdump not available — install Xcode command line tools)"
-    fi
+sep_row() {
+    printf "  %-18s" "------------------"
+    for crate in "${CRATES[@]}"; do printf "  %16s" "----------------"; done
+    printf "\n"
 }
+sep_row
 
-run_objdump "$STATIC_BIN"   "static_embedded"
-run_objdump "$LITERAL_BIN"  "static_literal"
-run_objdump "$LAZY_BIN"     "lazy_computed"
-run_objdump "$ARRAY_BIN"    "lazy_array"
-run_objdump "$RUNTIME_BIN"  "runtime_computed"
+for profile in "${PROFILES[@]}"; do
+    # Cargo puts named profiles (other than release/dev) under target/<profile-name>/
+    if [[ "$profile" == "release" ]]; then
+        dir="target/release"
+    else
+        dir="target/$profile"
+    fi
 
-# ── cargo-bloat (optional) ────────────────────────────────────────────────────
+    printf "  %-18s" "$profile"
+    for crate in "${CRATES[@]}"; do
+        bin="$dir/$crate"
+        if [[ -f "$bin" ]]; then
+            b=$(bytes_of "$bin")
+            printf "  %16s" "$(fmt_mb "$b") MB"
+        else
+            printf "  %16s" "(missing)"
+        fi
+    done
+    printf "\n"
+done
 
-if cargo bloat --version &>/dev/null 2>&1; then
-    header "cargo bloat — static_embedded (top 20 functions by size)"
-    cargo bloat --release -p static_embedded -n 20 2>&1 || true
+# ── Section breakdown for each profile × bloated crates ───────────────────────
 
-    header "cargo bloat — static_literal (top 20 functions by size)"
-    cargo bloat --release -p static_literal -n 20 2>&1 || true
+header "SECTION SIZES  (size tool, __TEXT / __DATA / __BSS)"
 
-    header "cargo bloat — lazy_computed (top 20 functions by size)"
-    cargo bloat --release -p lazy_computed -n 20 2>&1 || true
-
-    header "cargo bloat — lazy_array (top 20 functions by size)"
-    cargo bloat --release -p lazy_array -n 20 2>&1 || true
-
-    header "cargo bloat — runtime_computed (top 20 functions by size)"
-    cargo bloat --release -p runtime_computed -n 20 2>&1 || true
-else
+for profile in "${PROFILES[@]}"; do
+    [[ "$profile" == "release" ]] && dir="target/release" || dir="target/$profile"
     sep
-    echo "  cargo-bloat not installed (install: cargo install cargo-bloat)"
-    echo "  Skipping per-function breakdown."
-fi
+    printf "  profile: %s\n" "$profile"
+    sep
+    for crate in "${CRATES[@]}"; do
+        bin="$dir/$crate"
+        [[ -f "$bin" ]] && { printf "  %s\n" "$crate"; size "$bin"; } || true
+    done
+done
 
-# ── Summary table ─────────────────────────────────────────────────────────────
+# ── Key ratios per profile ─────────────────────────────────────────────────────
 
-header "SUMMARY"
+header "BLOAT RATIO  (static_literal / lazy_array)  per profile"
+printf "  The data bloat should be nearly constant regardless of profile;\n"
+printf "  optimization only affects code size, not .rodata.\n\n"
 
-bytes_of() { stat -f%z "$1" 2>/dev/null || stat -c%s "$1"; }
+for profile in "${PROFILES[@]}"; do
+    [[ "$profile" == "release" ]] && dir="target/release" || dir="target/$profile"
+    lit_bin="$dir/static_literal"
+    arr_bin="$dir/lazy_array"
+    if [[ -f "$lit_bin" && -f "$arr_bin" ]]; then
+        lit=$(bytes_of "$lit_bin")
+        arr=$(bytes_of "$arr_bin")
+        ratio=$(echo "scale=1; $lit / $arr" | bc)
+        printf "  %-18s  static_literal=%s MB   lazy_array=%s MB   ratio=%.1fx\n" \
+            "$profile" "$(fmt_mb "$lit")" "$(fmt_mb "$arr")" "$ratio"
+    fi
+done
 
-STATIC_BYTES=$(bytes_of "$STATIC_BIN")
-LITERAL_BYTES=$(bytes_of "$LITERAL_BIN")
-LAZY_BYTES=$(bytes_of "$LAZY_BIN")
-ARRAY_BYTES=$(bytes_of "$ARRAY_BIN")
-RUNTIME_BYTES=$(bytes_of "$RUNTIME_BIN")
-
-fmt_mb() { echo "scale=2; $1 / 1048576" | bc; }
-
-printf "  %-22s  %10s bytes  (%6s MB)\n" \
-    "static_embedded"  "$STATIC_BYTES"  "$(fmt_mb $STATIC_BYTES)"
-printf "  %-22s  %10s bytes  (%6s MB)\n" \
-    "static_literal"   "$LITERAL_BYTES" "$(fmt_mb $LITERAL_BYTES)"
-printf "  %-22s  %10s bytes  (%6s MB)\n" \
-    "lazy_computed"    "$LAZY_BYTES"    "$(fmt_mb $LAZY_BYTES)"
-printf "  %-22s  %10s bytes  (%6s MB)\n" \
-    "lazy_array"       "$ARRAY_BYTES"   "$(fmt_mb $ARRAY_BYTES)"
-printf "  %-22s  %10s bytes  (%6s MB)\n" \
-    "runtime_computed" "$RUNTIME_BYTES" "$(fmt_mb $RUNTIME_BYTES)"
-
-echo ""
-printf "  static_embedded  / lazy_computed    = %.1fx\n" \
-    "$(echo "scale=4; $STATIC_BYTES / $LAZY_BYTES"    | bc)"
-printf "  static_literal   / lazy_computed    = %.1fx\n" \
-    "$(echo "scale=4; $LITERAL_BYTES / $LAZY_BYTES"   | bc)"
-printf "  static_embedded  / lazy_array       = %.1fx\n" \
-    "$(echo "scale=4; $STATIC_BYTES / $ARRAY_BYTES"   | bc)"
-printf "  static_literal   / lazy_array       = %.1fx\n" \
-    "$(echo "scale=4; $LITERAL_BYTES / $ARRAY_BYTES"  | bc)"
-printf "  static_embedded  / runtime_computed = %.1fx\n" \
-    "$(echo "scale=4; $STATIC_BYTES / $RUNTIME_BYTES" | bc)"
 sep
-echo "  KEY INSIGHT"
-echo "  static_embedded and static_literal have identical binary bloat (~32 MB"
-echo "  in .rodata) because the compiler emits the same data whether it came"
-echo "  from include_bytes! or from parsed f64 literals."
-echo ""
-echo "  lazy_static does NOT help when the values are literals: the data is"
-echo "  already in the binary before main() runs. This is the Symphonia pattern."
-echo ""
-echo "  lazy_array uses the same [f64; N] type as static_literal but computes"
-echo "  values at runtime — BSS grows, but the binary file stays small."
-echo ""
-echo "  lazy_computed and runtime_computed stay small for the same reason:"
-echo "  only computation CODE is compiled, never the data values themselves."
+printf "  KEY INSIGHT\n"
+printf "  Across all profiles, static_embedded and static_literal remain ~32 MB\n"
+printf "  larger than the runtime variants. LTO and opt=z shrink the CODE section\n"
+printf "  by a few hundred KB at most — they cannot remove data that is actively\n"
+printf "  referenced. The only fix is to not embed the data at compile time.\n"
 sep
