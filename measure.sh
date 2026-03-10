@@ -49,46 +49,7 @@ for crate in "${CRATES[@]}"; do
     echo "  $crate : $("$bin")"
 done
 
-# ── Size grid ─────────────────────────────────────────────────────────────────
-
-header "BINARY SIZE GRID  (MB on disk)"
-
-# Header row
-printf "  %-18s" "profile \\ crate"
-for crate in "${CRATES[@]}"; do
-    printf "  %16s" "$crate"
-done
-printf "\n"
-
-sep_row() {
-    printf "  %-18s" "------------------"
-    for crate in "${CRATES[@]}"; do printf "  %16s" "----------------"; done
-    printf "\n"
-}
-sep_row
-
-for profile in "${PROFILES[@]}"; do
-    # Cargo puts named profiles (other than release/dev) under target/<profile-name>/
-    if [[ "$profile" == "release" ]]; then
-        dir="target/release"
-    else
-        dir="target/$profile"
-    fi
-
-    printf "  %-18s" "$profile"
-    for crate in "${CRATES[@]}"; do
-        bin="$dir/$crate"
-        if [[ -f "$bin" ]]; then
-            b=$(bytes_of "$bin")
-            printf "  %16s" "$(fmt_mb "$b") MB"
-        else
-            printf "  %16s" "(missing)"
-        fi
-    done
-    printf "\n"
-done
-
-# ── Section breakdown for each profile × bloated crates ───────────────────────
+# ── Section breakdown for each profile × all crates ───────────────────────────
 
 header "SECTION SIZES  (size tool, __TEXT / __DATA / __BSS)"
 
@@ -120,6 +81,39 @@ for profile in "${PROFILES[@]}"; do
         printf "  %-18s  static_literal=%s MB   lazy_array=%s MB   ratio=%.1fx\n" \
             "$profile" "$(fmt_mb "$lit")" "$(fmt_mb "$arr")" "$ratio"
     fi
+done
+
+# ── Binary size grid ───────────────────────────────────────────────────────────
+
+header "BINARY SIZE GRID  (MB on disk)"
+
+# Header row
+printf "  %-18s" "profile \\ crate"
+for crate in "${CRATES[@]}"; do
+    printf "  %16s" "$crate"
+done
+printf "\n"
+
+sep_row() {
+    printf "  %-18s" "------------------"
+    for crate in "${CRATES[@]}"; do printf "  %16s" "----------------"; done
+    printf "\n"
+}
+sep_row
+
+for profile in "${PROFILES[@]}"; do
+    [[ "$profile" == "release" ]] && dir="target/release" || dir="target/$profile"
+    printf "  %-18s" "$profile"
+    for crate in "${CRATES[@]}"; do
+        bin="$dir/$crate"
+        if [[ -f "$bin" ]]; then
+            b=$(bytes_of "$bin")
+            printf "  %16s" "$(fmt_mb "$b") MB"
+        else
+            printf "  %16s" "(missing)"
+        fi
+    done
+    printf "\n"
 done
 
 sep
