@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "static_embedded",
+    "static_literal",
     "lazy_computed",
     "runtime_computed",
 ]

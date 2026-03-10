@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
-# measure.sh — build all three versions and produce a detailed comparison.
+# measure.sh — build all four versions and produce a detailed comparison.
 # Run from the workspace root: bash measure.sh
 #
-# The three versions:
-#   static_embedded  — pre-computed data baked into binary at compile time
-#   lazy_computed    — lazy_static with runtime sin/cos computation
-#   runtime_computed — plain runtime Vec with a shared helper function
+# The four versions:
+#   static_embedded  — pre-computed data baked in via include_bytes! (build.rs → .bin files)
+#   static_literal   — pre-computed data as f64 literals in generated .rs source (Symphonia pattern)
+#   lazy_computed    — lazy_static with runtime sin/cos computation (no embedded data)
+#   runtime_computed — plain runtime Vec with a shared helper function (smallest binary)
 
 set -euo pipefail
 WORKSPACE="$(cd "$(dirname "$0")" && pwd)"
 cd "$WORKSPACE"
 
 STATIC_BIN="target/release/static_embedded"
+LITERAL_BIN="target/release/static_literal"
 LAZY_BIN="target/release/lazy_computed"
 RUNTIME_BIN="target/release/runtime_computed"
 
@@ -20,31 +22,38 @@ header() { sep; echo "  $*"; sep; }
 
 # ── Build ──────────────────────────────────────────────────────────────────────
 
-header "1 / 3  Building static_embedded (release)  [runs build.rs first]"
+header "1 / 4  Building static_embedded (release)  [build.rs → .bin files → include_bytes!]"
 cargo build --release -p static_embedded 2>&1
 
-header "2 / 3  Building lazy_computed (release)"
+header "2 / 4  Building static_literal (release)   [build.rs → .rs literals → include!]"
+cargo build --release -p static_literal 2>&1
+
+header "3 / 4  Building lazy_computed (release)"
 cargo build --release -p lazy_computed 2>&1
 
-header "3 / 3  Building runtime_computed (release)"
+header "4 / 4  Building runtime_computed (release)"
 cargo build --release -p runtime_computed 2>&1
 
-# ── Smoke-test: all three should print the same sum ───────────────────────────
+# ── Smoke-test: all four should print the same sum ────────────────────────────
 
 header "Smoke test — outputs must agree"
 echo "  static_embedded  : $("$STATIC_BIN")"
+echo "  static_literal   : $("$LITERAL_BIN")"
 echo "  lazy_computed    : $("$LAZY_BIN")"
 echo "  runtime_computed : $("$RUNTIME_BIN")"
 
 # ── Binary sizes ───────────────────────────────────────────────────────────────
 
 header "Binary sizes (ls -lh)"
-ls -lh "$STATIC_BIN" "$LAZY_BIN" "$RUNTIME_BIN"
+ls -lh "$STATIC_BIN" "$LITERAL_BIN" "$LAZY_BIN" "$RUNTIME_BIN"
 
 # ── Section breakdown — macOS (size) ──────────────────────────────────────────
 
 header "Section sizes — static_embedded"
 size "$STATIC_BIN"
+
+header "Section sizes — static_literal"
+size "$LITERAL_BIN"
 
 header "Section sizes — lazy_computed"
 size "$LAZY_BIN"
@@ -71,6 +80,7 @@ run_objdump() {
 }
 
 run_objdump "$STATIC_BIN"   "static_embedded"
+run_objdump "$LITERAL_BIN"  "static_literal"
 run_objdump "$LAZY_BIN"     "lazy_computed"
 run_objdump "$RUNTIME_BIN"  "runtime_computed"
 
@@ -79,6 +89,9 @@ run_objdump "$RUNTIME_BIN"  "runtime_computed"
 if cargo bloat --version &>/dev/null 2>&1; then
     header "cargo bloat — static_embedded (top 20 functions by size)"
     cargo bloat --release -p static_embedded -n 20 2>&1 || true
+
+    header "cargo bloat — static_literal (top 20 functions by size)"
+    cargo bloat --release -p static_literal -n 20 2>&1 || true
 
     header "cargo bloat — lazy_computed (top 20 functions by size)"
     cargo bloat --release -p lazy_computed -n 20 2>&1 || true
@@ -98,6 +111,7 @@ header "SUMMARY"
 bytes_of() { stat -f%z "$1" 2>/dev/null || stat -c%s "$1"; }
 
 STATIC_BYTES=$(bytes_of "$STATIC_BIN")
+LITERAL_BYTES=$(bytes_of "$LITERAL_BIN")
 LAZY_BYTES=$(bytes_of "$LAZY_BIN")
 RUNTIME_BYTES=$(bytes_of "$RUNTIME_BIN")
 
@@ -106,23 +120,31 @@ fmt_mb() { echo "scale=2; $1 / 1048576" | bc; }
 printf "  %-22s  %10s bytes  (%6s MB)\n" \
     "static_embedded"  "$STATIC_BYTES"  "$(fmt_mb $STATIC_BYTES)"
 printf "  %-22s  %10s bytes  (%6s MB)\n" \
+    "static_literal"   "$LITERAL_BYTES" "$(fmt_mb $LITERAL_BYTES)"
+printf "  %-22s  %10s bytes  (%6s MB)\n" \
     "lazy_computed"    "$LAZY_BYTES"    "$(fmt_mb $LAZY_BYTES)"
 printf "  %-22s  %10s bytes  (%6s MB)\n" \
     "runtime_computed" "$RUNTIME_BYTES" "$(fmt_mb $RUNTIME_BYTES)"
 
 echo ""
-RATIO_SL=$(echo "scale=1; $STATIC_BYTES / $LAZY_BYTES"   | bc)
-RATIO_SR=$(echo "scale=1; $STATIC_BYTES / $RUNTIME_BYTES" | bc)
-RATIO_LR=$(echo "scale=1; $LAZY_BYTES   / $RUNTIME_BYTES" | bc)
-
-printf "  static_embedded  / lazy_computed    = %sx\n" "$RATIO_SL"
-printf "  static_embedded  / runtime_computed = %sx\n" "$RATIO_SR"
-printf "  lazy_computed    / runtime_computed = %sx\n" "$RATIO_LR"
+printf "  static_embedded  / lazy_computed    = %.1fx\n" \
+    "$(echo "scale=4; $STATIC_BYTES / $LAZY_BYTES"    | bc)"
+printf "  static_literal   / lazy_computed    = %.1fx\n" \
+    "$(echo "scale=4; $LITERAL_BYTES / $LAZY_BYTES"   | bc)"
+printf "  static_embedded  / runtime_computed = %.1fx\n" \
+    "$(echo "scale=4; $STATIC_BYTES / $RUNTIME_BYTES" | bc)"
+printf "  static_literal   / runtime_computed = %.1fx\n" \
+    "$(echo "scale=4; $LITERAL_BYTES / $RUNTIME_BYTES" | bc)"
 sep
 echo "  KEY INSIGHT"
-echo "  The static_embedded binary is larger because ~32 MB of pre-computed"
-echo "  twiddle-factor DATA is baked into .rodata at compile time."
-echo "  lazy_computed and runtime_computed are nearly the same size because"
-echo "  both only compile the COMPUTATION CODE, not the data values."
-echo "  The data lives on the heap and is not present in the binary."
+echo "  static_embedded and static_literal have identical binary bloat (~32 MB"
+echo "  in .rodata) because the compiler emits the same data whether it came"
+echo "  from include_bytes! or from parsed f64 literals."
+echo ""
+echo "  lazy_static does NOT help: the data is already in the binary before"
+echo "  main() runs. lazy_static only defers the reference initialization."
+echo "  This is the Symphonia / Chrome-on-Android pattern."
+echo ""
+echo "  lazy_computed and runtime_computed stay small because the VALUES are"
+echo "  never written to the binary — only the computation CODE is compiled."
 sep
