@@ -3,6 +3,7 @@ members = [
     "static_embedded",
     "static_literal",
     "lazy_computed",
+    "lazy_array",
     "runtime_computed",
 ]
 resolver = "2"
