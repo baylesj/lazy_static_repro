@@ -3,11 +3,26 @@
 version = 4
 
 [[package]]
+name = "lazy_array"
+version = "0.1.0"
+dependencies = [
+ "lazy_static",
+]
+
+[[package]]
 name = "lazy_computed"
 version = "0.1.0"
 dependencies = [
  "lazy_static",
 ]
+
+[[package]]
+name = "lazy_lock_array"
+version = "0.1.0"
+
+[[package]]
+name = "lazy_lock_literal"
+version = "0.1.0"
 
 [[package]]
 name = "lazy_static"
@@ -21,6 +36,13 @@ version = "0.1.0"
 
 [[package]]
 name = "static_embedded"
+version = "0.1.0"
+dependencies = [
+ "lazy_static",
+]
+
+[[package]]
+name = "static_literal"
 version = "0.1.0"
 dependencies = [
  "lazy_static",
