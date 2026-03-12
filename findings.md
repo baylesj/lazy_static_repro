@@ -15,6 +15,10 @@ the data backing that value is compiled into the binary. If the data is expresse
 source code, it is embedded at compile time — unconditionally, before `main()` runs, before any
 "lazy" logic ever executes.
 
+And as our measurements show, even with runtime computation, the *type* you store in the lazy
+static determines whether the binary is small. This is the second trap developers fall into after
+switching away from literals.
+
 ---
 
 ## What these libraries actually do
@@ -32,7 +36,7 @@ What they guarantee:
 What they do **not** guarantee:
 - That the binary is smaller
 - That embedded data is deferred or excluded
-- Anything about compile-time data in `.rodata`
+- Anything about compile-time data in `.rodata` or `.data`
 
 ---
 
@@ -63,129 +67,175 @@ ever performs an FFT.
 
 ---
 
-## The three patterns and what they actually do
+## The patterns, what we expected, and what we measured
 
-### Pattern 1: Embedded literals (bloated)
+We built seven crates across four optimization profiles. All use 8 twiddle-factor tables
+of 524,288 `f64` values (4 MB each, 32 MB total if embedded).
 
-```rust
-// build.rs generates tables.rs with hardcoded f64 values.
-// include! splices them into the compilation unit as source.
-include!(concat!(env!("OUT_DIR"), "/tables.rs"));
-// Equivalent to writing: static TABLE_1: [f64; N] = [0.0, 1.2e-5, ...];
-
-lazy_static! {
-    static ref FFT_TWIDDLE: &'static [f64] = &TABLE_1;
-}
-```
-
-- Compiler sees literal values → emits them into `.rodata`
-- `lazy_static` / `LazyLock` wrapper makes no difference
-- Binary is ~32 MB larger than it needs to be
-- Data is present even if `FFT_TWIDDLE` is never accessed
-
-This covers: `static_literal` (lazy_static), `lazy_lock_literal` (LazyLock).
-
-### Pattern 2: include_bytes! (bloated, same result)
+### Pattern 1: Embedded literals — bloated (expected)
 
 ```rust
-static TABLE_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/twiddle.bin"));
+// Hardcoded f64 values in source → compiler emits them into .rodata
+static TABLE: [f64; N] = [0.0, 1.2e-5, /* ... */];
 
-lazy_static! {
-    static ref TABLE: &'static [f64] = unsafe { bytes_as_f64s(TABLE_BYTES) };
-}
-```
-
-Different mechanism, identical outcome: raw bytes are embedded in `.rodata` at compile time.
-The `lazy_static` defers the unsafe cast, not the data.
-
-### Pattern 3: Runtime computation (correct)
-
-```rust
 // With lazy_static:
+lazy_static! { static ref T: &'static [f64] = &TABLE; }
+
+// With LazyLock:
+static T: LazyLock<&'static [f64]> = LazyLock::new(|| &TABLE);
+```
+
+Both `lazy_static` and `LazyLock` wrappers produce identical binary size. The choice of
+primitive is irrelevant — the literals are already in `.rodata` before any lazy logic runs.
+
+Crates: `static_literal` (lazy_static), `lazy_lock_literal` (LazyLock), `static_embedded` (include_bytes!).
+
+### Pattern 2: Runtime computation, inline array type — bloated (unexpected)
+
+```rust
+// Values computed at runtime — no literals, should be small. Right?
 lazy_static! {
     static ref TABLE: [f64; N] =
         std::array::from_fn(|i| (2.0 * PI * i as f64 / N as f64).sin());
 }
-
-// With LazyLock (std, no dependency):
-static TABLE: LazyLock<[f64; N]> =
-    LazyLock::new(|| std::array::from_fn(|i| (2.0 * PI * i as f64 / N as f64).sin()));
 ```
 
-- Binary contains only the computation code (~KB), not the values
-- Array is computed on first access and stored in BSS (zero-initialized static storage)
-- If never accessed, computation never runs — *this* is what "lazy" actually buys you
+**Measured result: ~32.67 MB — identical to the literal variants.**
+
+`lazy_static` internally stores values in a `static UnsafeCell<MaybeUninit<T>>`. For
+`T = [f64; N]`, that reserves N×8 bytes of static storage per table. `MaybeUninit::uninit()`
+compiles to `undef` in LLVM IR — not a zero initializer — so the linker places it in
+`__DATA` (file-backed initialized data) rather than `__BSS` (zero-initialized, not stored
+in the file). The binary carries 32 MB of uninitialized storage on disk even though the
+values are computed at runtime.
+
+There is a second problem with `LazyLock<[f64; N]>`: the closure passed to `LazyLock::new`
+must return the array by value. The calling convention requires the 4 MB array to be
+constructed on the stack before being moved into `LazyLock`'s internal storage — which
+immediately overflows the default stack. The program crashes on first access.
+
+Crate: `lazy_array` (lazy_static, bloated but functional), `lazy_lock_array` (LazyLock,
+crashes with stack overflow — fixed in repo to use `Box<[f64]>`).
+
+### Pattern 3: Runtime computation, heap-allocated — correct
+
+```rust
+// lazy_static with Box:
+lazy_static! {
+    static ref TABLE: Box<[f64]> =
+        (0..N).map(|i| (2.0 * PI * i as f64 / N as f64).sin()).collect();
+}
+
+// LazyLock with Box (std, no dependency):
+static TABLE: LazyLock<Box<[f64]>> =
+    LazyLock::new(|| (0..N).map(|i| (2.0 * PI * i as f64 / N as f64).sin()).collect());
+```
+
+The static holds only an 8-byte pointer. The 32 MB of table data is heap-allocated on
+first access and never appears in the binary file. Binary is ~0.43 MB.
+
+Crates: `lazy_computed` (lazy_static + Box), `lazy_lock_array` after fix (LazyLock + Box),
+`runtime_computed` (plain Vec, no lazy primitive).
 
 ---
 
-## Binary size measurements
+## Binary size measurements (release profile, macOS)
 
-<!-- TODO: run `bash measure.sh` and paste the grid here -->
+| crate              | primitive   | value source     | type       | binary size |
+|--------------------|-------------|------------------|------------|-------------|
+| `static_embedded`  | lazy_static | include_bytes!   | &[f64]     | 32.67 MB    |
+| `static_literal`   | lazy_static | f64 literals     | [f64; N]   | 32.67 MB    |
+| `lazy_lock_literal`| LazyLock    | f64 literals     | [f64; N]   | 32.67 MB    |
+| `lazy_array`       | lazy_static | runtime computed | [f64; N]   | 32.67 MB    |
+| `lazy_computed`    | lazy_static | runtime computed | Box<[f64]> | 0.43 MB     |
+| `lazy_lock_array`  | LazyLock    | runtime computed | Box<[f64]> | 0.43 MB     |
+| `runtime_computed` | none        | runtime computed | Vec<f64>   | 0.42 MB     |
 
-Expected structure of results:
+The dividing line is not *lazy primitive* (lazy_static vs LazyLock) and not *value source*
+(literals vs computed). It is the **storage type**:
 
-| profile        | static_embedded | static_literal | lazy_lock_literal | lazy_computed | lazy_array | lazy_lock_array | runtime_computed |
-|----------------|----------------|----------------|-------------------|---------------|------------|-----------------|-----------------|
-| release        | ~33 MB         | ~33 MB         | ~33 MB            | ~1 MB         | ~1 MB      | ~1 MB           | ~1 MB           |
-| release-lto    | ~33 MB         | ~33 MB         | ~33 MB            | ~1 MB         | ~1 MB      | ~1 MB           | ~1 MB           |
-| release-size   | ~33 MB         | ~33 MB         | ~33 MB            | ~1 MB         | ~1 MB      | ~1 MB           | ~1 MB           |
-| release-min    | ~33 MB         | ~33 MB         | ~33 MB            | ~1 MB         | ~1 MB      | ~1 MB           | ~1 MB           |
+- Inline array `[f64; N]` → static storage in `__DATA` → large binary file
+- `Box<[f64]>` / `Vec<f64>` → 8-byte pointer in static → small binary file
 
-Key observation: **the bloat is invariant across optimization profiles.** `opt-level = "z"`,
-fat LTO, and symbol stripping reduce the `.text` (code) section by a few hundred KB.
-They cannot remove data in `.rodata` that is actively referenced by the program.
-The ~32 MB gap between embedded and computed variants is constant at every profile.
+---
+
+## Optimization profiles don't help
+
+Full grid across four profiles (MB on disk):
+
+| profile        | static_embedded | static_literal | lazy_lock_literal | lazy_array | lazy_computed | lazy_lock_array | runtime_computed |
+|----------------|-----------------|----------------|-------------------|------------|---------------|-----------------|------------------|
+| release        | 32.67 MB        | 32.67 MB       | 32.67 MB          | 32.67 MB   | 0.43 MB       | 0.43 MB         | 0.42 MB          |
+| release-lto    | 32.61 MB        | 32.61 MB       | 32.61 MB          | 32.62 MB   | 0.37 MB       | 0.37 MB         | 0.36 MB          |
+| release-size   | 32.60 MB        | 32.60 MB       | 32.60 MB          | 32.60 MB   | 0.35 MB       | 0.35 MB         | 0.35 MB          |
+| release-min    | 32.54 MB        | 32.54 MB       | 32.54 MB          | 32.54 MB   | 0.30 MB       | 0.30 MB         | 0.29 MB          |
+
+`opt-level = "z"`, fat LTO, and symbol stripping each shave a few hundred KB off the code
+section. They cannot remove data in `__DATA` or `.rodata` that is actively referenced. The
+~32 MB gap is constant at every profile — optimization is not a workaround.
 
 ---
 
 ## Why optimization can't save you
 
-When the compiler sees a referenced static, it must emit the data. Dead code elimination
-only applies to unreachable code — a static that is referenced (even behind a lazy wrapper)
-is reachable and will be included. The only way to remove the data from the binary is to
-not put it there in the first place.
+When the compiler sees a referenced static, it must emit the backing storage. Dead code
+elimination only applies to unreachable code paths. A static that is dereferenced anywhere
+in the program — even behind a lazy wrapper — will have its storage included in the binary.
 
 LTO can eliminate unused functions across crate boundaries. It cannot eliminate data that
-the program actively addresses at runtime.
+the program actively addresses at runtime, whether that data is literal values in `.rodata`
+or `MaybeUninit` storage in `__DATA`.
 
 ---
 
 ## The fix
 
-Replace literal tables with runtime computation:
+Replace inline array types with heap-allocated types:
 
 ```rust
-// Before (bloated — ~4 MB per table in .rodata):
-static TABLE: [f64; N] = [ /* 524,288 hardcoded values */ ];
-
-// After (no bloat — only the loop body is compiled):
+// Before — two problems: large binary + stack overflow with LazyLock:
 static TABLE: LazyLock<[f64; N]> =
-    LazyLock::new(|| std::array::from_fn(|i| {
-        (2.0 * PI * i as f64 / N as f64).sin()
-    }));
+    LazyLock::new(|| std::array::from_fn(|i| compute(i)));
+
+// Also before — large binary despite runtime computation:
+lazy_static! {
+    static ref TABLE: [f64; N] = std::array::from_fn(|i| compute(i));
+}
+
+// After — small binary, no stack overflow, works with either primitive:
+static TABLE: LazyLock<Box<[f64]>> =
+    LazyLock::new(|| (0..N).map(|i| compute(i)).collect());
+
+lazy_static! {
+    static ref TABLE: Box<[f64]> = (0..N).map(|i| compute(i)).collect();
+}
 ```
 
-Trade-off: a small runtime cost on first access to compute the values. For FFT twiddle
-tables this is milliseconds at startup — negligible compared to shipping 32 MB of data
-to every user and loading it into memory on every process start, whether or not an FFT
-is ever performed.
+Trade-off: a small one-time runtime cost to compute the values on first access. For FFT
+twiddle tables this is milliseconds at startup — negligible compared to shipping 32 MB of
+data to every user and loading it into memory on every process start, whether or not an
+FFT is ever performed.
+
+---
+
+## Summary
+
+Three independent variables interact here:
+
+| variable            | effect on binary size                              |
+|---------------------|----------------------------------------------------|
+| lazy primitive      | none — lazy_static and LazyLock are identical      |
+| value source        | literals → `.rodata` bloat; computed → no `.rodata` bloat |
+| storage type        | `[T; N]` → `__DATA` bloat; `Box`/`Vec` → no bloat |
+
+The only safe combination is: **runtime-computed values + heap-allocated storage type.**
 
 ---
 
 ## Repro
 
-This repository contains seven crates demonstrating each pattern, buildable across four
-optimization profiles:
-
 ```
+git clone https://github.com/baylesj/lazy_static_repro
+cd lazy_static_repro
 bash measure.sh
 ```
-
-Crates in order from most to least binary bloat:
-1. `static_embedded` — `include_bytes!` + `lazy_static`
-2. `static_literal` — literal array + `lazy_static`
-3. `lazy_lock_literal` — literal array + `LazyLock`
-4. `lazy_computed` — `lazy_static` + runtime `Box<[f64]>`
-5. `lazy_array` — `lazy_static` + runtime `[f64; N]`
-6. `lazy_lock_array` — `LazyLock` + runtime `[f64; N]`
-7. `runtime_computed` — plain `Vec`, no lazy primitive
